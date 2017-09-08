@@ -44,6 +44,7 @@ All worlds are initialized with the following parameters:
 import copy
 import importlib
 import random
+from tqdm import tqdm
 
 try:
     from torch.multiprocessing import Process, Value, Condition, Semaphore
@@ -704,6 +705,8 @@ class HogwildProcess(Process):
                         # let main thread know that all the examples are finished
                         with self.epochDone:
                             self.epochDone.notify_all()
+        for agent in shared_agents:
+            agent.shutdown()
 
 
 class HogwildWorld(World):
@@ -739,6 +742,9 @@ class HogwildWorld(World):
                                                agents, self.queued_items,
                                                self.epochDone, self.terminate,
                                                self.cnt))
+            if not hasattr(agents[0], 'can_multithread'):
+                break
+
         for t in self.threads:
             t.start()
 
@@ -860,3 +866,13 @@ def create_task(opt, user_agents):
         else:
             # TODO(ahm): fix this
             raise NotImplementedError('hogwild multiworld not supported yet')
+
+def execute_world(world, use_tqdm=False, maxes=0):
+    num_iter = len(world)
+    if maxes:
+        num_iter = math.min(num_iter, maxes)
+    for _ in (tqdm(range(num_iter)) if use_tqdm else range(num_iter)):
+        world.parley()
+    if hasattr(world, 'synchronize'):
+        world.synchronize()
+    world.shutdown()
