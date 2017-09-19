@@ -5,10 +5,8 @@
 # of patent rights can be found in the PATENTS file in the same directory.
 """a string match retriever."""
 
-import asyncio
-import copy
 import logging
-from multiprocessing import Lock, Queue, Semaphore, Value
+from multiprocessing import Lock, Queue, Value
 import numpy as np
 import os
 import scipy.sparse as sp
@@ -25,8 +23,8 @@ except ImportError:
 from parlai.core.agents import Agent
 
 
-class StringMatchRetrieverAgent(Agent):
-    """Builds and/or loads a string match retriever
+class TfidfRetrieverAgent(Agent):
+    """Builds and/or loads a TFIDF retriever.
 
     Input document is saved to <retriever_database> as a DB table <fact_id, fact>:
         - fact_id INT: the unique identifier
@@ -57,7 +55,7 @@ class StringMatchRetrieverAgent(Agent):
         )
         retriever.add_argument(
             '--retriever-maxexs',
-            default=StringMatchRetrieverAgent.DEFAULT_MAX_FACTS,
+            default=TfidfRetrieverAgent.DEFAULT_MAX_FACTS,
             type=int,
             help='max number of examples to build retriever on; input 0 if no limit.',
         )
@@ -72,7 +70,7 @@ class StringMatchRetrieverAgent(Agent):
 
     def __init__(self, opt, shared=None):
         super().__init__(opt)
-        self.id = 'StringMatchRetrieverAgent'
+        self.id = 'TfidfRetrieverAgent'
         self.retriever_file = opt.get('retriever_file')
         self.doc_file = opt.get(
             'retriever_database',
@@ -102,6 +100,8 @@ class StringMatchRetrieverAgent(Agent):
             self.fact_id = Value('i', 0)
             self.db_lock = Lock()
             self.comm_queues = []
+            self.data_collection_thread = Thread(target=self._process_child_data)
+            self.data_collection_thread.start()
 
     def _compute_count_matrix(self):
         if not hasattr(self, 'count_matrix'):
@@ -128,6 +128,7 @@ class StringMatchRetrieverAgent(Agent):
             return
         if self.db_lock.acquire(is_block):
             with self.cursor.connection:
+                # INSERT INTO table (fact_id, fact) VALUES (?,?)
                 self.cursor.executemany(self.FACT_QUERY, self.insert_wait_list)
             self.insert_wait_list = []
             self.db_lock.release()
@@ -146,7 +147,7 @@ class StringMatchRetrieverAgent(Agent):
 
     def _get_num_tokens(self):
         if not hasattr(self, 'num_tokens'):
-            self.num_tokens =  len(self.all_tokens)
+            self.num_tokens = len(self.all_tokens)
         return self.num_tokens
 
     def _init_fact_table(self):
@@ -155,13 +156,13 @@ class StringMatchRetrieverAgent(Agent):
             doc_conn = sqlite3.connect(self.doc_file)
         except sqlite3.Error:
             raise RuntimeError("Unable to access DB file '%s'" % self.doc_file)
-        doc_conn.execute("PRAGMA journal_mode=WAL")
+        doc_conn.execute("PRAGMA journal_mode=MEMORY")
         doc_conn.execute("PRAGMA busy_timeout=60000")
         if is_new_table:
             doc_cursor = doc_conn.cursor()
             doc_cursor.execute(
                 "CREATE TABLE %s (fact_id INTEGER PRIMARY KEY, fact) WITHOUT ROWID"
-                % StringMatchRetrieverAgent.DOC_TABLE_NAME
+                % TfidfRetrieverAgent.DOC_TABLE_NAME
             )
         self.cursor = doc_conn.cursor()
 
@@ -173,6 +174,7 @@ class StringMatchRetrieverAgent(Agent):
         return new_fact_id
 
     def _new_fact_id(self):
+        # get process-unique id for each fact
         with self.fact_id.get_lock():
             cur_id = self.fact_id.value
             self.fact_id.value += 1
@@ -187,15 +189,16 @@ class StringMatchRetrieverAgent(Agent):
         for row in self.cursor.execute('select * from %s' % self.DOC_TABLE_NAME):
             print(row)
 
-    def _process_act(self, fact):
-        fact_id = self._insert_fact_without_id(fact)
-        unique_tokens, tokens_cnts = np.unique(self._tokenize(fact), return_counts=True)
-        for ind in range(len(unique_tokens)):
-            self._new_freq(
-                unique_tokens[ind],
-                fact_id,
-                tokens_cnts[ind],
-            )
+    # def _process_act(self, fact):
+    #     fact_id = self._insert_fact_without_id(fact)
+    #     unique_tokens, tokens_cnts = np.unique(
+    #         self._tokenize(fact), return_counts=True)
+    #     for ind in range(len(unique_tokens)):
+    #         self._new_freq(
+    #             unique_tokens[ind],
+    #             fact_id,
+    #             tokens_cnts[ind],
+    #         )
 
     def _process_child_data(self):
         self.child_token_map = [dict() for _ in self.comm_queues]
@@ -209,21 +212,22 @@ class StringMatchRetrieverAgent(Agent):
             if data == self.END_OF_DATA:
                 break
             elif isinstance(data, dict):
-                for (_token, _token_id) in data.items():
-                    _true_token_id = self._token2id(_token)
-                    self.child_token_map[queue_ind][_token_id] = _true_token_id
+                for token, token_id in data.items():
+                    true_token_id = self._token2id(token)
+                    self.child_token_map[queue_ind][token_id] = true_token_id
             elif isinstance(data, list):
-                [_token_ids, _fact_ids, _freqs] = data
-                for ind in trange(len(_token_ids)):
+                [token_ids, fact_ids, freqs] = data
+                for ind in trange(len(token_ids)):
                     self._new_freq(
-                        self.child_token_map[queue_ind][_token_ids[ind]],
-                        _fact_ids[ind],
-                        _freqs[ind],
+                        self.child_token_map[queue_ind][token_ids[ind]],
+                        fact_ids[ind],
+                        freqs[ind],
                     )
             else:
-                raise RuntimeError("StringMatchRetrieverAgent: wrong data format send from child to master.")
+                raise RuntimeError("TfidfRetrieverAgent: wrong data format send from child to master.")
 
     def _token2id(self, token):
+        """Get unique id (create one if necessary) for given token."""
         if isinstance(token, int):
             return token
         if token not in self.all_tokens:
@@ -233,31 +237,38 @@ class StringMatchRetrieverAgent(Agent):
 
     def _tokenize(self, query):
         tokens = self.tokenizer.tokenize(utils.normalize(query))
-        return tokens.ngrams(n=1, uncased=True,
-                             filter_fn=utils.filter_ngram)
-
-
-### inherit functions
+        return tokens.ngrams(n=1, uncased=True, filter_fn=utils.filter_ngram)
 
     def act(self):
-        # reset tfidfs matrix
+        """Add observation to database and count token frequencies."""
         if hasattr(self, 'tfidfs'):
+            # reset tfidfs matrix, we are adding more tokens / freqs to it
             del self.tfidfs
             del self.count_matrix
             del self.doc_freqs
             del self.num_docs
             del self.num_tokens
-        if 'text' not in self.observation:
-            logging.warning("observation: %s has no 'text' field, skipped." % str(self.observation))
-            return {'id': 'Retriever'}
-        self.cnt += 1
-        # report progress
-        if self.cnt % 10000 == 0:
-            self.print_info("Processed %d rows..." % self.cnt)
-        self._process_act(self.observation.get('text'))
-        return {'id': 'Retriever'}
+        if 'text' in self.observation:
+            self.cnt += 1
+            # report progress
+            if self.cnt % 10000 == 0:
+                self.print_info("Processed %d rows..." % self.cnt)
+            # process fact
+            fact = self.observation['text']
+            fact_id = self._insert_fact_without_id(fact)  # add to db
+            unique_tokens, tokens_cnts = np.unique(
+                self._tokenize(fact), return_counts=True)
+            for ind in range(len(unique_tokens)):
+                # log frequencies for each token
+                self._new_freq(
+                    unique_tokens[ind],
+                    fact_id,
+                    tokens_cnts[ind],
+                )
+        return {'id': 'TfidfRetriever'}
 
     def load(self):
+        """Load token ids and token frequencies."""
         if not os.path.isfile(self.retriever_file):
             return
         self.all_tokens = np.load(self.token_file).item()
@@ -266,6 +277,7 @@ class StringMatchRetrieverAgent(Agent):
         self._compute_tfidf_from_count_matrix(self.count_matrix)
 
     def save(self):
+        """Save token ids and frequencies."""
         np.save(self.token_file, self.all_tokens)
         sp.save_npz(self.retriever_file, self._compute_count_matrix())
 
@@ -298,13 +310,10 @@ class StringMatchRetrieverAgent(Agent):
             self.data_collection_thread.join()
             self.save()
 
-    def start_data_collection(self):
-        if not hasattr(self, "data_collection_thread"):
-            self.data_collection_thread = Thread(target=self._process_child_data)
-            self.data_collection_thread.start()
-
-
-### Public functions:
+    # def start_data_collection(self):
+    #     if not hasattr(self, "data_collection_thread"):
+    #         self.data_collection_thread = Thread(target=self._process_child_data)
+    #         self.data_collection_thread.start()
 
     def compute_tfidf(self):
         return self._compute_tfidf_from_count_matrix(self._compute_count_matrix())

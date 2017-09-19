@@ -8,27 +8,27 @@
 import copy
 import os
 
-from parlai.agents.ir_baseline.ir_retrieve import StringMatchRetrieverAgent
+from parlai.agents.ir_baseline.ir_retrieve import TfidfRetrieverAgent
 from parlai.core.params import ParlaiParser, str2class
 from parlai.core.worlds import create_task
 
 
 def build_retriever(opt):
     if not opt.get('retriever_file'):
-        StringMatchRetrieverAgent.print_info(None, 'Tried to build retriever but `--retriever-file` is not set. Set ' +
+        TfidfRetrieverAgent.print_info(None, 'Tried to build retriever but `--retriever-file` is not set. Set ' +
               'this param to save the retriever.')
         return
-    StringMatchRetrieverAgent.print_info(None, 'setting up retriever.')
+    TfidfRetrieverAgent.print_info(None, 'setting up retriever.')
     if os.path.isfile(opt['retriever_file']):
         # retriever already built
-        StringMatchRetrieverAgent.print_info(None, "retriever already built.")
+        TfidfRetrieverAgent.print_info(None, "retriever already built.")
         return
     if opt.get('retriever_class'):
         # Custom retriever class
         retriever = str2class(opt['retriever_class'])(opt)
     else:
         # Default retriever class
-        retriever = StringMatchRetrieverAgent(opt)
+        retriever = TfidfRetrieverAgent(opt)
     ordered_opt = copy.deepcopy(opt)
     cnt = 0
     # we use train set to build retriever
@@ -43,7 +43,7 @@ def build_retriever(opt):
 def main():
     # Get command line arguments
     argparser = ParlaiParser()
-    StringMatchRetrieverAgent.add_cmdline_args(argparser)
+    TfidfRetrieverAgent.add_cmdline_args(argparser)
     opt = argparser.parse_args()
     build_retriever(opt)
 

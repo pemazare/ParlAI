@@ -10,7 +10,7 @@ from multiprocessing import Process
 import unittest
 
 from examples.build_retriever import build_retriever
-from parlai.agents.ir_baseline.ir_retrieve import StringMatchRetrieverAgent
+from parlai.agents.ir_baseline.ir_retrieve import TfidfRetrieverAgent
 from parlai.core.params import ParlaiParser
 
 
@@ -64,12 +64,12 @@ class TestStringMatchRetriever(unittest.TestCase):
             '0',
         ]
         argparser = ParlaiParser()
-        StringMatchRetrieverAgent.add_cmdline_args(argparser)
+        TfidfRetrieverAgent.add_cmdline_args(argparser)
         return argparser.parse_args(args)
 
     def test_retriever(self):
         opt = self._init_opt()
-        my_retriever = StringMatchRetrieverAgent(opt)
+        my_retriever = TfidfRetrieverAgent(opt)
         for fact in self.test_facts:
             my_retriever.observe({'text': fact})
             my_retriever.act()
@@ -81,14 +81,14 @@ class TestStringMatchRetriever(unittest.TestCase):
         ans1 = list(my_retriever.retrieve('test', 1))
         self.assertEqual(ans1, ["test additional"])
         # test save/load
-        my_retriever2 = StringMatchRetrieverAgent(opt)
+        my_retriever2 = TfidfRetrieverAgent(opt)
         self._test_retriever_functionality(my_retriever2)
 
     def test_retriever_multithread(self):
         numthreads = 10
         num_iter = 1000
         opt = self._init_opt(numthreads=numthreads)
-        my_retriever = StringMatchRetrieverAgent(opt)
+        my_retriever = TfidfRetrieverAgent(opt)
 
 
         class LoadTestProcess(Process):
@@ -102,7 +102,7 @@ class TestStringMatchRetriever(unittest.TestCase):
                 super().__init__()
 
             def run(self):
-                my_retriever = StringMatchRetrieverAgent(self.opt, self.shared)
+                my_retriever = TfidfRetrieverAgent(self.opt, self.shared)
                 for ind in range(self.num_iter):
                     for fact in self.tests:
                         my_retriever.observe(
@@ -114,8 +114,8 @@ class TestStringMatchRetriever(unittest.TestCase):
         for ind in range(numthreads):
             LoadTestProcess(ind, self.test_facts, num_iter, opt, my_retriever).start()
         my_retriever.shutdown()
-        my_retriever2 = StringMatchRetrieverAgent(opt)
-        ans1 = list(my_retriever.retrieve("iter1 Drama", numthreads))
+        my_retriever2 = TfidfRetrieverAgent(opt)
+        ans1 = list(my_retriever2.retrieve("iter1 Drama", numthreads))
         self.assertEqual(set(ans1), set([
             "process%d iter1 : Unconditional has_genre Drama" % ind
             for ind in range(numthreads)]))
@@ -147,14 +147,14 @@ class TestStringMatchRetriever(unittest.TestCase):
     def test_build_retriever(self):
         opt = self._init_opt()
         build_retriever(opt)
-        my_retriever = StringMatchRetrieverAgent(opt)
+        my_retriever = TfidfRetrieverAgent(opt)
         self._test_retriever_functionality_wikimovie(my_retriever)
 
     def test_build_retriever_multithread(self):
         opt = self._init_opt(numthreads=2)
         build_retriever(opt)
         opt['numthreads'] = 1
-        my_retriever = StringMatchRetrieverAgent(opt)
+        my_retriever = TfidfRetrieverAgent(opt)
         self._test_retriever_functionality_wikimovie(my_retriever)
 
     def test_build_retriever_zreddit(self):

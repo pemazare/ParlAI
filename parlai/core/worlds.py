@@ -123,8 +123,9 @@ class World(object):
             self.agents = agents
 
     def parley(self):
-        """ The main method, that does one step of actions for the agents
-        in the world. This is empty in the base class."""
+        """The main method, that does one step of actions for the agents
+        in the world. This is empty in the base class.
+        """
         pass
 
     def getID(self):
@@ -133,6 +134,7 @@ class World(object):
 
     def display(self):
         """Returns a string describing the current state of the world.
+
         Useful for monitoring and debugging.
         By default, display the messages between the agents."""
         if not hasattr(self, 'acts'):
@@ -140,11 +142,12 @@ class World(object):
         return display_messages(self.acts)
 
     def episode_done(self):
-        """Whether the episode is done or not. """
+        """Whether the episode is done or not."""
         return False
 
     def epoch_done(self):
         """Whether the epoch is done or not.
+
         Not all worlds have the notion of an epoch, but this is useful
         for fixed training, validation or test sets.
         """
@@ -158,8 +161,9 @@ class World(object):
         return shared_data
 
     def _share_agents(self):
-        """ create shared data for agents so other classes can create the same
-        agents without duplicating the data (i.e. sharing parameters)."""
+        """Create shared data for agents so other classes can create the same
+        agents without duplicating the data (i.e. sharing parameters).
+        """
         if not hasattr(self, 'agents'):
             return None
         shared_agents = [a.share() for a in self.agents]
@@ -213,28 +217,16 @@ class World(object):
         for a in self.agents:
             a.save()
 
-    def synchronize(self):
-        """Can be used to synchronize processes."""
-        pass
-
     def shutdown(self):
-        """Performs any cleanup, if appropriate."""
+        """Perform any cleanup, if appropriate."""
         pass
-
-    def auto_execute(self, use_tqdm=True, maxes=0):
-        with self:
-            cnt = 0
-            for _ in self:
-                if maxes:
-                    cnt += 1
-                    if cnt > maxes:
-                        break
-                self.parley()
 
 
 class DialogPartnerWorld(World):
-    """This basic world switches back and forth between two agents, giving each
-    agent one chance to speak per turn and passing that back to the other agent.
+    """Simple world for two agents communicating synchronously.
+
+    This basic world switches back and forth between two agents, giving each
+    agent one chance to speak per turn and passing that back to the other one.
     """
 
     def __init__(self, opt, agents, shared=None):
@@ -244,7 +236,7 @@ class DialogPartnerWorld(World):
             self.agents = create_agents_from_shared(shared['agents'])
         else:
             if len(agents) != 2:
-                raise RuntimeError('There must be exactly two agents for this ' +
+                raise RuntimeError('There must be exactly two agents for this '
                                    'world.')
             # Add passed in agents directly.
             self.agents = agents
@@ -260,7 +252,7 @@ class DialogPartnerWorld(World):
         agents[0].observe(validate(acts[1]))
 
     def episode_done(self):
-        """ Only the first agent indicates when the episode is done."""
+        """Only the first agent indicates when the episode is done."""
         if self.acts[0] is not None:
             return self.acts[0].get('episode_done', False)
         else:
@@ -685,7 +677,7 @@ class HogwildProcess(Process):
     Each ``HogwildProcess`` contain its own unique ``World``.
     """
 
-    def __init__(self, tid, world, opt, agents, sem, fin, term, cnt, back_sem):
+    def __init__(self, tid, world, opt, agents, sem, fin, term, back_sem):
         self.threadId = tid
         self.world_type = world
         self.opt = opt
@@ -693,7 +685,6 @@ class HogwildProcess(Process):
         self.queued_items = sem
         self.epochDone = fin
         self.terminate = term
-        self.cnt = cnt
         self.back_sem = back_sem
         super().__init__()
 
@@ -709,12 +700,15 @@ class HogwildProcess(Process):
                     break  # time to close
                 self.queued_items.acquire()
                 if not world.epoch_done():
+                    # do one example if any available
                     world.parley()
-                    self.back_sem.release()
+                    self.back_sem.release()  # send control back to main thread
                 else:
                     with self.epochDone.get_lock():
+                        # increment the number of finished threads
                         self.epochDone.value += 1
-                    self.back_sem.release()
+                    self.back_sem.release()  # send control back to main thread
+                    self.queued_items.release()  # we didn't process anything
                     break
 
 
@@ -744,25 +738,25 @@ class HogwildWorld(World):
         self.epochDone = Value('i', 0)  # notifies when exs are finished
         self.terminate = Value('b', False)  # tells threads when to shut down
         self.back_sem = Semaphore(self.numthreads)
-        self.cnt = Value('i', 0)  # number of exs that remain to be processed
+        self.iter = iter(self)
 
         self.threads = []
         for i in range(self.numthreads):
             self.threads.append(HogwildProcess(i, world_class, opt,
                                                agents, self.queued_items,
                                                self.epochDone, self.terminate,
-                                               self.cnt, self.back_sem))
+                                               self.back_sem))
         for t in self.threads:
             t.start()
 
 
     def __iter__(self):
         # prepare to iter
-        for agent in self.inner_world.agents:
-            agent.start_data_collection()
         return self
 
     def __next__(self):
+        """Queue one item to be processed."""
+        self.queued_items.release()
         self.back_sem.acquire()
         with self.epochDone.get_lock():
             if self.epochDone.value == self.numthreads:
@@ -777,8 +771,8 @@ class HogwildWorld(World):
         return False
 
     def parley(self):
-        """Queue one item to be processed."""
-        self.queued_items.release()
+        next(self)
+
 
     def getID(self):
         return self.inner_world.getID()
@@ -790,12 +784,16 @@ class HogwildWorld(World):
         self.inner_world.save_agents()
 
     def shutdown(self):
-        """Set shutdown flag and wake threads up to close themselves"""
-        for agent in self.inner_world.agents:
-            agent.shutdown()
+        """Set shutdown flag and wake threads up to close themselves."""
+        with self.terminate.get_lock():
+            self.terminate.value = True
+        # wake up each thread by queueing fake examples
+        for _ in self.threads:
+            self.queued_items.release()
         # wait for threads to close
         for t in self.threads:
             t.join()
+        self.inner_world.shutdown()
 
 
 ### Functions for creating tasks/worlds given options.

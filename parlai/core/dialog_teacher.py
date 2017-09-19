@@ -8,8 +8,8 @@ from .agents import Teacher
 
 from .image_featurizers import ImageLoader
 
-import logging
-from multiprocessing import Queue, Value
+from multiprocessing import Queue
+from queue import Empty
 import os
 import random
 import sys
@@ -54,7 +54,7 @@ class DialogTeacher(Teacher):
             self.data = data_class(opt, shared=shared['data'], **kwargs)
         else:
             self.data = data_class(opt, data_loader=self.setup_data,
-                    cands=self.label_candidates(), **kwargs)
+                                   cands=self.label_candidates(), **kwargs)
 
         # for ordered data in batch mode (especially, for validation and
         # testing), each teacher in the batch gets a start index and a step
@@ -65,8 +65,9 @@ class DialogTeacher(Teacher):
         self.reset()
 
     def reset(self):
-        # Reset the dialog so that it is at the start of the epoch,
-        # and all metrics are reset.
+        """Reset the dialog so that it is at the start of the epoch,
+        and all metrics are reset.
+        """
         self.metrics.clear()
         self.lastY = None
         self.episode_idx = self.data_offset - self.step_size
@@ -196,8 +197,7 @@ class DialogData(object):
             self.cands = shared.get('cands', None)
         else:
             self.image_loader = ImageLoader(opt)
-            self.data = []
-            self._load(data_loader, opt['datafile'])
+            self.data = self._load(data_loader, opt['datafile'])
             self.cands = None if cands == None else set(sys.intern(c) for c in cands)
         self.addedCands = []
         self.copied_cands = False
@@ -278,8 +278,10 @@ class DialogData(object):
         """Loads up data from an iterator over tuples described in the class
         docs.
         """
+        data = []
         for episode in self._read_episode(data_loader(datafile)):
-            self.data.append(episode)
+            data.append(episode)
+        return data
 
     def num_episodes(self):
         """Return number of episodes in the dataset."""
@@ -343,90 +345,86 @@ class DialogData(object):
 
 class StreamDialogData(DialogData):
     """Provides a data structure for streaming textual dialog data.
+
     This can be used whenever the dialog data follows the format described in
     DialogData but cannot fit entirely into memory.
 
     Additional keyword-argument cycle defines if the stream should restart from
     the beginning after an epoch is finished (defaults to False).
+
+    This class also handles multiple files, including allowing for hogwild
+    loading of those files in parallel (each process claims one file at a time
+    from a shared queue until no files remain).
     """
 
     def __init__(self, opt, data_loader=None, cands=None, shared=None, **kwargs):
+        # first set everything up that we need
         self.cycle = kwargs['cycle'] if 'cycle' in kwargs else False
-        self.data_loader = data_loader
         if shared:
-            # auxiliary instances hold pointer to main datastream (in self.data)
-            self.reset_data = shared['reset']
             self.file_queue = shared['file_queue']
-            self.num_file_queue_left = shared['num_file_queue_left']
         else:
             # main instance holds the stream and shares pointer to it
             self.datafile = opt['datafile']
-            self.file_queue = Queue()
-            self.num_file_queue_left = Value('i', 0)
-            file_list = []
-            if os.path.isfile(self.datafile):
-                file_list.append((self.datafile, os.stat(self.datafile).st_size))
-            elif os.path.isdir(self.datafile):
-                for dirpath, _, filenames in os.walk(self.datafile):
-                    for f in filenames:
-                        full_path = os.path.join(dirpath, f)
-                        file_list.append((full_path, os.stat(full_path).st_size))
-            else:
-                raise RuntimeError("input file does not exist.")
-            with self.num_file_queue_left.get_lock():
-                self.num_file_queue_left.value += len(file_list)
+
+            file_list = self.all_files_and_sizes(self.datafile)
+            # assign the largest files first
             file_list.sort(key=lambda x: -x[1])
-            for _filename, _size in file_list:
-                self.file_queue.put(_filename)
-            self.reset_data = None
-            self.is_reset = True
+            self.file_queue = Queue()
+            for filename, _size in file_list:
+                self.file_queue.put(filename)
         # super() call initiates stream in self.data by calling _load()
         super().__init__(opt, data_loader, cands, shared, **kwargs)
-        self.entry_idx = 0
-        self.next_episode = None
-        self.cur_file = None
+        self.reset()
+
+    def all_files_and_sizes(self, path):
+        """Return a list of tuples of files and their sizes in a directory."""
+        file_list = []
+        if os.path.isfile(path):
+            file_list.append((path, os.stat(path).st_size))
+        elif os.path.isdir(path):
+            for dirpath, _, filenames in os.walk(path):
+                for f in filenames:
+                    new_pth = os.path.join(dirpath, f)
+                    if os.path.isfile(new_pth):
+                        file_list.append((new_pth, os.stat(new_pth).st_size))
+                    elif os.path.isdir(new_pth):
+                        file_list.extend(self.all_files_and_sizes(new_pth))
+        else:
+            raise RuntimeError('Path does not exist.')
+        return file_list
 
     def share(self):
         shared = super().share()
-        # put back the file
         if self.cur_file:
+            # put back the file if sharing--you probably aren't processing it
+            # you can pull it back out if you need to
             self.file_queue.put(self.cur_file)
             self.cur_file = None
-            with self.num_file_queue_left.get_lock():
-                self.num_file_queue_left += 1
         shared['file_queue'] = self.file_queue
-        shared['num_file_queue_left'] = self.num_file_queue_left
-        # also share reset method to allow datastream to be reset
-        shared['reset'] = self.reset
         return shared
 
     def __len__(self):
         # unknown
         return 0
 
-    def _load(self, data_loader, datafile):
+    def _load(self, data_loader):
         """Load data generator into data field."""
-        self.data = self._data_generator(data_loader, datafile)
+        return self._data_generator(data_loader)
 
-    def _data_generator(self, data_loader, datafile):
+    def _data_generator(self, data_loader):
         """Generates data using the iterator over tuples constructed
         by data_loader.
         """
-        self.is_reset = False
         while True:
-            with self.num_file_queue_left.get_lock():
-                num_left = self.num_file_queue_left.value
-                self.num_file_queue_left.value -= 1
-            if num_left % 50 == 0:
-                logging.info("%d files left..." % num_left)
-            if num_left <= 0:
-                while True:
-                    yield ((None,),)
-            else:
-                datafile = self.file_queue.get()
-                self.cur_file = datafile
-                for episode in self._read_episode(data_loader(datafile)):
+            try:
+                self.cur_file = self.file_queue.get(block=False)
+                if self.cycle:
+                    # put it back on the end of the queue if we are cycling
+                    self.file_queue.put(self.cur_file)
+                for episode in self._read_episode(data_loader(self.cur_file)):
                     yield episode
+            except Empty:
+                yield ((None,),)
 
     def num_episodes(self):
         # unknown
@@ -461,15 +459,11 @@ class StreamDialogData(DialogData):
         return table, end_of_data
 
     def reset(self):
-        """Reset the datastream to its beginning"""
-        if self.reset_data is not None:
-            # auxiliary instance, reset main datastream
-            self.data = self.reset_data()
-            self.next_episode = None
-        elif not self.is_reset:
-            # if main instance is not reset, reset datastream
-            self._load(self.data_loader, self.datafile)
-            self.is_reset = True
-            self.next_episode = None
+        """Reset the datastream to its beginning."""
+        # put back current file
+        if self.cur_file is not None:
+            self.file_queue.put(self.cur_file)
+        self.next_episode = None
         self.entry_idx = 0
-        return self.data
+        self.cur_file = None
+        self.data = self._load(self.data_loader)
