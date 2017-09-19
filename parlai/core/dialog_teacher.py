@@ -407,7 +407,7 @@ class StreamDialogData(DialogData):
         # unknown
         return 0
 
-    def _load(self, data_loader):
+    def _load(self, data_loader, data_file=None):
         """Load data generator into data field."""
         return self._data_generator(data_loader)
 
