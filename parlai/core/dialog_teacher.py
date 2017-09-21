@@ -102,7 +102,7 @@ class DialogTeacher(Teacher):
         return None
 
     def observe(self, observation):
-        """Process observation for metrics. """
+        """Process observation for metrics."""
         if self.lastY is not None:
             self.metrics.update(observation, self.lastY)
             self.lastY = None
@@ -360,6 +360,7 @@ class StreamDialogData(DialogData):
     def __init__(self, opt, data_loader=None, cands=None, shared=None, **kwargs):
         # first set everything up that we need
         self.cycle = kwargs['cycle'] if 'cycle' in kwargs else False
+        self.data_loader = data_loader
         if shared:
             self.file_queue = shared['file_queue']
         else:
@@ -461,7 +462,7 @@ class StreamDialogData(DialogData):
     def reset(self):
         """Reset the datastream to its beginning."""
         # put back current file
-        if self.cur_file is not None:
+        if hasattr(self, 'cur_file') and self.cur_file is not None:
             self.file_queue.put(self.cur_file)
         self.next_episode = None
         self.entry_idx = 0

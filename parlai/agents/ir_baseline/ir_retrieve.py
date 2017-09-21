@@ -26,9 +26,10 @@ from parlai.core.agents import Agent
 class TfidfRetrieverAgent(Agent):
     """Builds and/or loads a TFIDF retriever.
 
-    Input document is saved to <retriever_database> as a DB table <fact_id, fact>:
-        - fact_id INT: the unique identifier
-        - fact STRING: the fact string
+    Input document is saved to <retriever_database> as a DB table:
+        - id INT: the unique identifier
+        - x TEXT: fact used for looking up entry
+        - y TEXT: optional label attached to the lookup key
     Frequency (sparse) matrix is saved to <retriever-file>.
     Token to id mapping is saved to <retriever_tokens>.
 
@@ -36,15 +37,14 @@ class TfidfRetrieverAgent(Agent):
     """
 
     BUFFER_SIZE = 1000
-    END_OF_DATA = "EOD"
+    END_OF_DATA = 'EOD'
     DEFAULT_MAX_FACTS = 100000
     DOC_TABLE_NAME = 'document'
     FACT_QUERY = (
-        "INSERT INTO %s(fact_id, fact) VALUES(?,?)" %
+        'INSERT INTO %s (id,x,y) VALUES(?,?,?)' %
         DOC_TABLE_NAME
     )
-    TFIDFS_TABLE_NAME = "tfidfs"
-
+    TFIDFS_TABLE_NAME = 'tfidfs'
 
     @staticmethod
     def add_cmdline_args(argparser):
@@ -70,52 +70,75 @@ class TfidfRetrieverAgent(Agent):
 
     def __init__(self, opt, shared=None):
         super().__init__(opt)
+        # set basic attributes
         self.id = 'TfidfRetrieverAgent'
         self.retriever_file = opt.get('retriever_file')
-        self.doc_file = opt.get(
-            'retriever_database',
-            '_' + self.retriever_file + '.db',
-        )
-        self.token_file = opt.get(
-            'retriever_tokens',
-            '_' + self.retriever_file + '.npy',
-        )
-        self.all_tokens = {}
-        self._init_fact_table()
+        self.token_file = opt.get('retriever_tokens',
+                                  self.retriever_file + '.npy')
+
+        # initialize sqlite table
+        doc_file = opt.get('retriever_database', self.retriever_file + '.db')
+        is_new_table = not os.path.isfile(doc_file)
+        try:
+            doc_conn = sqlite3.connect(doc_file)
+        except sqlite3.Error:
+            raise RuntimeError('Unable to access DB file "%s"' % doc_file)
+        doc_conn.execute('PRAGMA journal_mode=MEMORY')  # TODO: `try` WAL?
+        doc_conn.execute('PRAGMA busy_timeout=60000')
+        self.cursor = doc_conn.cursor()
+        if is_new_table:
+            self.cursor.execute(
+                'CREATE TABLE %s (id INTEGER PRIMARY KEY, x TEXT, y TEXT DEFAULT NULL) WITHOUT ROWID'
+                % TfidfRetrieverAgent.DOC_TABLE_NAME
+            )
+
+
+        # set up internal variables
+        self.all_tokens = {}  # token => id dict
         self.tokenizer = tokenizers.get_class(opt.get('tokenizer', 'simple'))()
         self.freq_token = []
         self.freq_fact_id = []
         self.freq_freq = []
-        self.cnt = 0
-        self.load()
         self.insert_wait_list = []
+        self.cnt = 0
+
+        if self.retriever_file and os.path.isfile(self.retriever_file):
+            # load pre-existing data
+            self.load(self.retriever_file, self.token_file)
+
+        # set up primary thread vs child threads
         if shared:
-            self.fact_id = shared['fact_id']
+            self.num_docs = shared['num_docs']
             self.db_lock = shared['db_lock']
             self.comm_queue = shared['comm_queue']
             self.child_id = shared['child_id']
             self.shared_queue = shared['shared_queue']
         else:
             self.shared_queue = Queue()
-            self.fact_id = Value('i', 0)
+            self.num_docs = Value('i', 0)
             self.db_lock = Lock()
+
+            # do we need this stuff below??
             self.comm_queues = []
             self.data_collection_thread = Thread(target=self._process_child_data)
             self.data_collection_thread.start()
 
-    def _compute_count_matrix(self):
+    def _get_count_matrix(self):
+        """Get count matrix, computing and caching the result if needed."""
         if not hasattr(self, 'count_matrix'):
             count_matrix = sp.csr_matrix(
                 (self.freq_freq, (self.freq_token, self.freq_fact_id)),
-                shape=(self._get_num_tokens(), self._get_num_docs())
+                shape=(self.len(self.all_tokens), self.num_docs.value)
             )
             count_matrix.sum_duplicates()
             self.count_matrix = count_matrix
         return self.count_matrix
 
-    def _compute_tfidf_from_count_matrix(self, count_matrix):
+    def _get_tfidf_from_count_matrix(self, count_matrix):
+        """Get tfidf matrix, computing and caching the result if needed."""
         if not hasattr(self, 'tfidfs'):
-            Ns = self._get_doc_freqs(count_matrix)
+            binary = (count_matrix > 0).astype(int)
+            Ns = np.array(binary.sum(1)).squeeze()
             idfs = np.log((count_matrix.shape[1] - Ns + 0.5) / (Ns + 0.5))
             idfs[idfs < 0] = 0
             idfs = sp.diags(idfs, 0)
@@ -123,50 +146,40 @@ class TfidfRetrieverAgent(Agent):
             self.tfidfs = idfs.dot(tfs)
         return self.tfidfs
 
-    def _flush_db_wait_list(self, is_block):
+    def _flush_db_wait_list(self, block=True):
+        """Push all entries in waitlist to the database."""
         if not self.insert_wait_list:
             return
-        if self.db_lock.acquire(is_block):
+        if self.db_lock.acquire(block):
+            # TODO: is this with safe? is this lock valid? why not `with` lock?
             with self.cursor.connection:
-                # INSERT INTO table (fact_id, fact) VALUES (?,?)
+                # INSERT INTO table (id, x, y) VALUES (?,?,?)
                 self.cursor.executemany(self.FACT_QUERY, self.insert_wait_list)
-            self.insert_wait_list = []
+            self.insert_wait_list.clear()
             self.db_lock.release()
 
-    def _get_doc_freqs(self, cnts):
-        if not hasattr(self, 'doc_freqs'):
-            binary = (cnts > 0).astype(int)
-            freqs = np.array(binary.sum(1)).squeeze()
-            self.doc_freqs = freqs
-        return self.doc_freqs
+    # deprecated
+    # def _get_doc_freqs(self, cnts):
+    #     if not hasattr(self, 'doc_freqs'):
+    #         binary = (cnts > 0).astype(int)
+    #         freqs = np.array(binary.sum(1)).squeeze()
+    #         self.doc_freqs = freqs
+    #     return self.doc_freqs
 
-    def _get_num_docs(self):
-        if not hasattr(self, 'num_docs'):
-            self.num_docs = self.fact_id.value
-        return self.num_docs
+    # deprecated
+    # def _get_num_docs(self):
+    #     if not hasattr(self, 'num_docs'):
+    #         self.num_docs = self.num_docs.value
+    #     return self.num_docs
 
-    def _get_num_tokens(self):
-        if not hasattr(self, 'num_tokens'):
-            self.num_tokens = len(self.all_tokens)
-        return self.num_tokens
-
-    def _init_fact_table(self):
-        is_new_table = not os.path.isfile(self.doc_file)
-        try:
-            doc_conn = sqlite3.connect(self.doc_file)
-        except sqlite3.Error:
-            raise RuntimeError("Unable to access DB file '%s'" % self.doc_file)
-        doc_conn.execute("PRAGMA journal_mode=MEMORY")
-        doc_conn.execute("PRAGMA busy_timeout=60000")
-        if is_new_table:
-            doc_cursor = doc_conn.cursor()
-            doc_cursor.execute(
-                "CREATE TABLE %s (fact_id INTEGER PRIMARY KEY, fact) WITHOUT ROWID"
-                % TfidfRetrieverAgent.DOC_TABLE_NAME
-            )
-        self.cursor = doc_conn.cursor()
+    # deprecated
+    # def _get_num_tokens(self):
+    #     if not hasattr(self, 'num_tokens'):
+    #         self.num_tokens = len(self.all_tokens)
+    #     return self.num_tokens
 
     def _insert_fact_without_id(self, fact):
+        """Add fact to the wait-list and assign it a unique id."""
         new_fact_id = self._new_fact_id()
         self.insert_wait_list.append((new_fact_id, fact,))
         if len(self.insert_wait_list) >= self.BUFFER_SIZE:
@@ -174,10 +187,10 @@ class TfidfRetrieverAgent(Agent):
         return new_fact_id
 
     def _new_fact_id(self):
-        # get process-unique id for each fact
-        with self.fact_id.get_lock():
-            cur_id = self.fact_id.value
-            self.fact_id.value += 1
+        """Get unique id (among all processes) for each fact."""
+        with self.num_docs.get_lock():
+            cur_id = self.num_docs.value
+            self.num_docs.value += 1
         return cur_id
 
     def _new_freq(self, token, fact_id, freq):
@@ -189,6 +202,7 @@ class TfidfRetrieverAgent(Agent):
         for row in self.cursor.execute('select * from %s' % self.DOC_TABLE_NAME):
             print(row)
 
+    # deprecated, was called from `act`
     # def _process_act(self, fact):
     #     fact_id = self._insert_fact_without_id(fact)
     #     unique_tokens, tokens_cnts = np.unique(
@@ -200,36 +214,57 @@ class TfidfRetrieverAgent(Agent):
     #             tokens_cnts[ind],
     #         )
 
+    # used as the target for the processing thread
     def _process_child_data(self):
         self.child_token_map = [dict() for _ in self.comm_queues]
         for _ in range(len(self.comm_queues)):
             queue_ind = self.shared_queue.get()
-            self._process_data(queue_ind)
+            while True:
+                data = self.comm_queues[queue_ind].get()
+                if data == self.END_OF_DATA:
+                    break
+                elif isinstance(data, dict):
+                    for token, token_id in data.items():
+                        true_token_id = self._token2id(token)
+                        self.child_token_map[queue_ind][token_id] = true_token_id
+                elif isinstance(data, list):
+                    [token_ids, fact_ids, freqs] = data
+                    for ind in trange(len(token_ids)):
+                        self._new_freq(
+                            self.child_token_map[queue_ind][token_ids[ind]],
+                            fact_ids[ind],
+                            freqs[ind],
+                        )
+                else:
+                    raise RuntimeError("TfidfRetrieverAgent: wrong data format send from child to master.")
 
-    def _process_data(self, queue_ind):
-        while True:
-            data = self.comm_queues[queue_ind].get()
-            if data == self.END_OF_DATA:
-                break
-            elif isinstance(data, dict):
-                for token, token_id in data.items():
-                    true_token_id = self._token2id(token)
-                    self.child_token_map[queue_ind][token_id] = true_token_id
-            elif isinstance(data, list):
-                [token_ids, fact_ids, freqs] = data
-                for ind in trange(len(token_ids)):
-                    self._new_freq(
-                        self.child_token_map[queue_ind][token_ids[ind]],
-                        fact_ids[ind],
-                        freqs[ind],
-                    )
-            else:
-                raise RuntimeError("TfidfRetrieverAgent: wrong data format send from child to master.")
+    # deprecated
+    # just called from process child data
+    # def _process_data(self, queue_ind):
+    #     while True:
+    #         data = self.comm_queues[queue_ind].get()
+    #         if data == self.END_OF_DATA:
+    #             break
+    #         elif isinstance(data, dict):
+    #             for token, token_id in data.items():
+    #                 true_token_id = self._token2id(token)
+    #                 self.child_token_map[queue_ind][token_id] = true_token_id
+    #         elif isinstance(data, list):
+    #             [token_ids, fact_ids, freqs] = data
+    #             for ind in trange(len(token_ids)):
+    #                 self._new_freq(
+    #                     self.child_token_map[queue_ind][token_ids[ind]],
+    #                     fact_ids[ind],
+    #                     freqs[ind],
+    #                 )
+    #         else:
+    #             raise RuntimeError("TfidfRetrieverAgent: wrong data format send from child to master.")
 
     def _token2id(self, token):
         """Get unique id (create one if necessary) for given token."""
         if isinstance(token, int):
-            return token
+            raise RuntimeError('surprise')
+            # return token
         if token not in self.all_tokens:
             token_id = len(self.all_tokens)
             self.all_tokens[token] = token_id
@@ -246,7 +281,6 @@ class TfidfRetrieverAgent(Agent):
             del self.tfidfs
             del self.count_matrix
             del self.doc_freqs
-            del self.num_docs
             del self.num_tokens
         if 'text' in self.observation:
             self.cnt += 1
@@ -267,23 +301,22 @@ class TfidfRetrieverAgent(Agent):
                 )
         return {'id': 'TfidfRetriever'}
 
-    def load(self):
+    def load(self, retriever_file, token_file):
         """Load token ids and token frequencies."""
-        if not os.path.isfile(self.retriever_file):
-            return
-        self.all_tokens = np.load(self.token_file).item()
-        self.count_matrix = sp.load_npz(self.retriever_file)
-        (self.num_tokens, self.num_docs) = np.shape(self.count_matrix)
-        self._compute_tfidf_from_count_matrix(self.count_matrix)
+        self.all_tokens = np.load(token_file).item()
+        self.count_matrix = sp.load_npz(retriever_file)
+        dim = np.shape(self.count_matrix)
+        self.num_docs.value = dim[1]
+        self._get_tfidf_from_count_matrix(self.count_matrix)
 
     def save(self):
         """Save token ids and frequencies."""
         np.save(self.token_file, self.all_tokens)
-        sp.save_npz(self.retriever_file, self._compute_count_matrix())
+        sp.save_npz(self.retriever_file, self._get_count_matrix())
 
     def share(self):
         shared = super().share()
-        shared['fact_id'] = self.fact_id
+        shared['num_docs'] = self.num_docs
         shared['db_lock'] = self.db_lock
         shared['child_id'] = len(self.comm_queues)
         self.comm_queues.append(Queue())
@@ -316,7 +349,7 @@ class TfidfRetrieverAgent(Agent):
     #         self.data_collection_thread.start()
 
     def compute_tfidf(self):
-        return self._compute_tfidf_from_count_matrix(self._compute_count_matrix())
+        return self._get_tfidf_from_count_matrix(self._get_count_matrix())
 
     def print_info(self, msg):
         add_info = "-- Process %d" % self.child_id if hasattr(self, 'child_id') else ""
@@ -336,14 +369,14 @@ class TfidfRetrieverAgent(Agent):
         tfs = np.log1p(wids_counts)
         # Count IDF
         Ns = self.doc_freqs[wids_unique]
-        idfs = np.log((self._get_num_docs() - Ns + 0.5) / (Ns + 0.5))
+        idfs = np.log((self.num_docs.value - Ns + 0.5) / (Ns + 0.5))
         idfs[idfs < 0] = 0
         # TF-IDF
         data = np.multiply(tfs, idfs)
         # One row, sparse csr matrix
         indptr = np.array([0, len(wids_unique)])
         spvec = sp.csr_matrix(
-            (data, wids_unique, indptr), shape=(1, self._get_num_tokens())
+            (data, wids_unique, indptr), shape=(1, self.len(self.all_tokens))
         )
         res = spvec * self.tfidfs
         if len(res.data) <= max_results:
