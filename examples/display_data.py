@@ -32,7 +32,7 @@ def main():
 
     # Show some example dialogs.
     with world:
-        for _ in range(opt['num_examples']):
+        for _ in range(0, opt['num_examples'], opt.get('batchsize', 1)):
             world.parley()
             print(world.display() + '\n~~')
             if world.epoch_done():

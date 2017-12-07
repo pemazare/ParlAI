@@ -702,15 +702,16 @@ class HogwildProcess(Process):
         """
         shared_agents = create_agents_from_shared(self.agent_shares, self.threadId)
         world = self.world_type(self.opt, shared_agents)
+        self.sync['threads_sem'].release()
         with world:
             while True:
                 if self.sync['term_flag'].value:
                     break  # time to close
                 self.sync['queued_sem'].acquire()
+                self.sync['threads_sem'].release()
                 if not world.epoch_done():
                     # do one example if any available
                     world.parley()
-                    self.sync['threads_sem'].release()  # send control back to main thread
                 else:
                     with self.sync['epoch_done_flag'].get_lock():
                         # increment the number of finished threads
@@ -747,7 +748,7 @@ class HogwildWorld(World):
         self.sync = {  # syncronization primitives
             # semaphores for counting queued examples
             'queued_sem': Semaphore(0),  # counts num exs to be processed
-            'threads_sem': Semaphore(self.numthreads),  # counts threads
+            'threads_sem': Semaphore(0),  # counts threads
             'reset_sem': Semaphore(0),  # allows threads to reset
 
             # flags for communicating with threads
@@ -756,12 +757,18 @@ class HogwildWorld(World):
             'term_flag': Value('b', False),  # threads should terminate
         }
 
+        # don't let threads create more threads!
+        opt = copy.deepcopy(opt)
+        opt['numthreads'] = 1
         self.threads = []
         for i in range(self.numthreads):
             self.threads.append(HogwildProcess(i, world_class, opt, agents,
                                                self.sync))
         for t in self.threads:
             t.start()
+
+        for _ in self.threads:
+            self.sync['threads_sem'].acquire()
 
 
     def display(self):
