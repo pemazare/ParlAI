@@ -688,40 +688,37 @@ class HogwildProcess(Process):
     """
 
 
-    def __init__(self, tid, world, opt, agents, sem, fin, term, cnt, back_sem):
+    def __init__(self, tid, world, opt, agents, sync):
         self.threadId = tid
         self.world_type = world
         self.opt = opt
         self.agent_shares = [a.share() for a in agents]
-        self.queued_items = sem
-        self.epochDone = fin
-        self.terminate = term
-        self.cnt = cnt
-        self.back_sem = back_sem
+        self.sync = sync
         super().__init__()
 
     def run(self):
         """Runs normal parley loop for as many examples as this thread can get
-        ahold of via the semaphore ``queued_items``.
+        ahold of via the semaphore ``queued_sem``.
         """
         shared_agents = create_agents_from_shared(self.agent_shares, self.threadId)
         world = self.world_type(self.opt, shared_agents)
         with world:
             while True:
-                if self.terminate.value:
+                if self.sync['term_flag'].value:
                     break  # time to close
-                self.queued_items.acquire()
+                self.sync['queued_sem'].acquire()
                 if not world.epoch_done():
                     # do one example if any available
                     world.parley()
-                    self.back_sem.release()  # send control back to main thread
+                    self.sync['threads_sem'].release()  # send control back to main thread
                 else:
-                    with self.epochDone.get_lock():
+                    with self.sync['epoch_done_flag'].get_lock():
                         # increment the number of finished threads
-                        self.epochDone.value += 1
-                    self.back_sem.release()  # send control back to main thread
-                    self.queued_items.release()  # we didn't process anything
-                    break
+                        self.sync['epoch_done_flag'].value = True
+                    self.sync['threads_sem'].release()  # send control back to main thread
+                    self.sync['queued_sem'].release()  # we didn't process anything
+                    self.sync['reset_sem'].acquire()
+                    world.reset()
 
 
 class HogwildWorld(World):
@@ -746,37 +743,47 @@ class HogwildWorld(World):
     def __init__(self, world_class, opt, agents):
         self.inner_world = world_class(opt, agents)
         self.numthreads = opt['numthreads']
-        self.queued_items = Semaphore(0)  # counts num exs to be processed
-        self.epochDone = Value('i', 0)  # notifies when exs are finished
-        self.terminate = Value('b', False)  # tells threads when to shut down
-        self.back_sem = Semaphore(self.numthreads)
-        self.cnt = Value('i', 0)  # number of exs that remain to be processed
+
+        self.sync = {  # syncronization primitives
+            # semaphores for counting queued examples
+            'queued_sem': Semaphore(0),  # counts num exs to be processed
+            'threads_sem': Semaphore(self.numthreads),  # counts threads
+            'reset_sem': Semaphore(0),  # allows threads to reset
+
+            # flags for communicating with threads
+            'epoch_done_flag': Value('b', False),  # epoch is done
+            'reset_flag': Value('b', False),  # threads should reset
+            'term_flag': Value('b', False),  # threads should terminate
+        }
 
         self.threads = []
         for i in range(self.numthreads):
-            self.threads.append(HogwildProcess(i, world_class, opt,
-                                               agents, self.queued_items,
-                                               self.epochDone, self.terminate,
-                                               self.cnt, self.back_sem))
+            self.threads.append(HogwildProcess(i, world_class, opt, agents,
+                                               self.sync))
         for t in self.threads:
             t.start()
 
 
     def display(self):
+        return ''
         self.shutdown()
         raise NotImplementedError('Hogwild does not support displaying in-run'
                                   ' task data. Use `--numthreads 1`.')
 
     def episode_done(self):
-        return False
+        self.shutdown()
+        raise RuntimeError('episode_done() undefined for hogwild')
+
+    def epoch_done(self):
+        return self.sync['epoch_done_flag'].value
 
     def parley(self):
         """Queue one item to be processed."""
-        self.queued_items.release()
-        self.back_sem.acquire()
-        with self.epochDone.get_lock():
-            if self.epochDone.value == self.numthreads:
-                raise StopIteration()
+        # schedule an example
+        self.sync['queued_sem'].release()
+        # keep main process from getting too far ahead of the threads
+        # this way it can only queue up to numthreads unprocessed examples
+        self.sync['threads_sem'].acquire()
 
     def getID(self):
         return self.inner_world.getID()
@@ -787,13 +794,20 @@ class HogwildWorld(World):
     def save_agents(self):
         self.inner_world.save_agents()
 
+    def reset(self):
+        # release reset semaphore
+        for _ in self.threads:
+            self.sync['reset_sem'].release()
+
     def shutdown(self):
         """Set shutdown flag and wake threads up to close themselves."""
-        with self.terminate.get_lock():
-            self.terminate.value = True
-        # wake up each thread by queueing fake examples
+        # set shutdown flag
+        with self.sync['term_flag'].get_lock():
+            self.sync['term_flag'].value = True
+        # wake up each thread by queueing fake examples or setting reset flag
         for _ in self.threads:
-            self.queued_items.release()
+            self.sync['queued_sem'].release()
+            self.sync['reset_sem'].release()
         # wait for threads to close
         for t in self.threads:
             t.join()
@@ -854,12 +868,13 @@ def create_task(opt, user_agents):
     # valid and test in order to guarantee exactly one epoch of training.
     # If batchsize > 1, default to BatchWorld, as numthreads can be used for
     # multithreading in batch mode, e.g. multithreaded data loading
-    if opt.get('numthreads', 1) == 1 or 'train' not in opt['datatype'] or opt.get('batchsize', 1) > 1:
+    if opt.get('numthreads', 1) == 1 or opt.get('batchsize', 1) > 1:
         if ',' not in opt['task']:
             # Single task
             world = create_task_world(opt, user_agents)
         else:
             # Multitask teacher/agent
+            # TODO: remove and replace with multiteachers only?
             world = MultiWorld(opt, user_agents)
 
         if opt.get('batchsize', 1) > 1:
