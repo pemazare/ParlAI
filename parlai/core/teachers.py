@@ -232,14 +232,18 @@ class FixedDialogTeacher(Teacher):
 
         return shared
 
-    def next_episode_idx(self, num_eps=None):
+    def next_episode_idx(self, num_eps=None, loop=None):
         if not num_eps:
             num_eps = self.num_episodes()
+        if loop is None:
+            loop = self.training
         if self.random:
             new_idx = random.randrange(num_eps)
         else:
             with self._lock():
-                self.index.value = (self.index.value + 1) % num_eps
+                self.index.value += 1
+                if loop:
+                    self.index %= num_eps
                 new_idx = self.index.value
         return new_idx
 
@@ -249,6 +253,9 @@ class FixedDialogTeacher(Teacher):
             self.entry_idx = 0
         else:
             self.entry_idx += 1
+
+        if self.episode_idx >= self.num_episodes():
+            return {'episode_done': True, 'id': self.getID()}, True
 
         ex = self.get(self.episode_idx, self.entry_idx)
         self.episode_done = ex['episode_done']
@@ -300,9 +307,6 @@ class FixedDialogTeacher(Teacher):
             # reset if haven't yet
             self.reset()
 
-        # if self.index.value >= len(self.batches) - 1:
-        #     self.epochDone = True
-
         if self.epochDone and not self.training:
             # only do one epoch if not training, user needs to call reset()
             return [{'episode_done': True, 'id': self.getID()}] * self.bsz
@@ -339,17 +343,9 @@ class FixedDialogTeacher(Teacher):
             # reset if haven't yet
             self.reset()
 
-        # if self.index.value < self.episode_idx:
-            # self.epochDone = True
-            # import sys; print('early', self.index.value, self.episode_idx, file=sys.stderr)
-
-
-        if self.epochDone and not self.training:
-            # only do one epoch if not training, user needs to call reset()
-            return {'episode_done': True, 'id': self.getID()}
-
         # get next example
         action, self.epochDone = self.next_example()
+        print(action.get('labels'), self.episode_idx)
         action['id'] = self.getID()
 
         # remember correct answer if available
@@ -358,7 +354,7 @@ class FixedDialogTeacher(Teacher):
             # move labels to eval field so not used for training
             # but this way the model can use the labels for perplexity or loss
             action['eval_labels'] = action.pop('labels')
-        print('action---')
+
         return action
 
 
