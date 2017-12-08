@@ -806,6 +806,9 @@ class HogwildWorld(World):
         for _ in self.threads:
             self.sync['reset_sem'].release()
 
+    def reset_metrics(self):
+        self.inner_world.reset_metrics()
+
     def shutdown(self):
         """Set shutdown flag and wake threads up to close themselves."""
         # set shutdown flag

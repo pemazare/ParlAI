@@ -224,16 +224,16 @@ class FixedDialogTeacher(Teacher):
             # share lastYs to communicate between batch_act and observe
             shared['lastYs'] = self.lastYs
 
-        if self.opt.get('numthreads') > 1:
+        if (self.opt.get('numthreads') > 1 and
+            type(self.index) is not multiprocessing.sharedctypes.Synchronized):
             # for multithreading need to move index into shared / locked memory
-            if type(self.index) is not multiprocessing.sharedctypes.Synchronized:
-                self.index = Value('l', -1)
+            self.index = Value('l', -1)
         shared['index'] = self.index
 
         return shared
 
     def next_episode_idx(self, num_eps=None, loop=None):
-        if not num_eps:
+        if num_eps is None:
             num_eps = self.num_episodes()
         if loop is None:
             loop = self.training
@@ -243,7 +243,7 @@ class FixedDialogTeacher(Teacher):
             with self._lock():
                 self.index.value += 1
                 if loop:
-                    self.index %= num_eps
+                    self.index.value %= num_eps
                 new_idx = self.index.value
         return new_idx
 
@@ -255,7 +255,7 @@ class FixedDialogTeacher(Teacher):
             self.entry_idx += 1
 
         if self.episode_idx >= self.num_episodes():
-            return {'episode_done': True, 'id': self.getID()}, True
+            return {'episode_done': True}, True
 
         ex = self.get(self.episode_idx, self.entry_idx)
         self.episode_done = ex['episode_done']
@@ -307,23 +307,22 @@ class FixedDialogTeacher(Teacher):
             # reset if haven't yet
             self.reset()
 
-        if self.epochDone and not self.training:
-            # only do one epoch if not training, user needs to call reset()
-            return [{'episode_done': True, 'id': self.getID()}] * self.bsz
-
         # get next batch
         with self._lock():
             self.index.value += 1
+            if self.training:
+                self.index.value %= len(self.batches)
             batch_idx = self.index.value
 
             if batch_idx + 1 >= len(self.batches):
-                self.index.value = -1
                 if self.random:
                     random.shuffle(self.batches)
-                else:
-                    self.epochDone = True
+                self.epochDone = True
             else:
                 self.epochDone = False
+
+        if batch_idx >= len(self.batches):
+            return [{'episode_done': True, 'id': self.getID()}] * self.bsz
 
         batch = self.batches[batch_idx]
 
@@ -343,9 +342,8 @@ class FixedDialogTeacher(Teacher):
             # reset if haven't yet
             self.reset()
 
-        # get next example
+        # get next example, action is episode_done dict if already out of exs
         action, self.epochDone = self.next_example()
-        print(action.get('labels'), self.episode_idx)
         action['id'] = self.getID()
 
         # remember correct answer if available
