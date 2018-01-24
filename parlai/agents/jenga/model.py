@@ -424,6 +424,7 @@ class DocReaderModel(object):
         }
         text = ex[-2]
         spans = ex[-1]
+
         if ensemble:
             if para_mode:
                 raise NotImplementedError

@@ -684,21 +684,23 @@ class JengaDocReader(nn.Module):
                 def self_attention(x_img, x_mask, i):
                     if self.args.jenga_self_attention:
                         x_img = x_img.view(x_img.size(0) * batch_size, x_img.size(1) // batch_size, -1)
+                        attn_out = []
                         if self.args.jenga_nb_attention_head == 1:
-                            x_img = self.self_attn[i](x_img, x_mask,
+                            attn_out.append(self.self_attn[i](x_img, x_mask,
                                                       scale_dot_product=self.args.jenga_scale_attention_output,
                                                       return_projected=self.args.jenga_attention_projected,
-                                                      residual_attention=self.args.jenga_attention_residuals)
+                                                      residual_attention=self.args.jenga_attention_residuals))
                             i += 1
                         else:
-                            attn = []
                             for j in range(self.args.jenga_nb_attention_head):
-                                attn.append(self.self_attn[i](x_img, x_mask,
+                                attn_out.append(self.self_attn[i](x_img, x_mask,
                                                           scale_dot_product=self.args.jenga_scale_attention_output,
                                                           return_projected=True,
                                                           residual_attention=self.args.jenga_attention_residuals))
                                 i += 1
-                            x_img = torch.cat(attn, dim=2)
+                        if self.args.jenga_attention_cat:
+                            attn_out.append(x_img)
+                        x_img = torch.cat(attn_out, dim=2)
                         x_img = x_img.view(x_img.size(0) // batch_size, x_img.size(1) * batch_size, -1)
                     return x_img, i
                 self_attention_idx = 0

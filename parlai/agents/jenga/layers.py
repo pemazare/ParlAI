@@ -661,12 +661,6 @@ class SeqSelfAttnMatch(nn.Module):
             matched_seq = alpha.bmm(x_proj)
         else:
             matched_seq = alpha.bmm(x)
-            if (matched_seq != matched_seq).data.max():
-                import pdb
-                pdb.set_trace()
-                print(matched_seq)
-            if self.remove_id:
-                matched_seq = torch.cat([matched_seq, x], dim=2)
             if residual_attention:
                 matched_seq += x
 

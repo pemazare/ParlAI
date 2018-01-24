@@ -231,8 +231,8 @@ class JengaAgent(Agent):
         """Save the parameters of the agent to a file."""
         fname = self.opt.get('model_file', None) if fname is None else fname
         if fname:
-            print("[ saving model: " + fname + " ]")
-            self.model.save(fname)
+            print("[ NOT saving model: " + fname + " ]")
+            # self.model.save(fname)
 
     # --------------------------------------------------------------------------
     # Helper functions.
