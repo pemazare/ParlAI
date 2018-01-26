@@ -230,6 +230,24 @@ def add_cmdline_args(parser):
         help='Run a max-pooling question-wise before applying the RNN on the context'
     )
     agent.add_argument(
+        '--jenga_final_project',
+        type='bool',
+        default=False,
+        help='Add a final projection at the end of jenga, before the question-wide max-pooling'
+    )
+    agent.add_argument(
+        '--jenga_question_final_from_lstm',
+        type='bool',
+        default=False,
+        help='Use independent LSTM to extract question representation'
+    )
+    agent.add_argument(
+        '--jenga_question_final_sa_sum',
+        type='bool',
+        default=False,
+        help='Use a self-attended sum of the question H to get a question representation'
+    )
+    agent.add_argument(
         '--jenga_use_question_final',
         type='bool',
         default=False,
@@ -695,6 +713,7 @@ def add_cmdline_args(parser):
     agent.add_argument(
         '--top_n', type=int, default=1, help='Pick best prediction among top n'
     )
+    return agent
 
 def set_defaults(opt):
     # Embeddings options

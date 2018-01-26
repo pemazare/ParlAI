@@ -345,11 +345,14 @@ class JengaDocReader(nn.Module):
             self.flat_proj = nn.Linear(h_expander * args.hidden_size, h_expander * args.hidden_size)
 
         if self.args.jenga_use_question_final:
-            self.question_rnn = nn.LSTM(args.embedding_dim, args.hidden_size, num_layers=2, bidirectional=True)
+            if self.args.jenga_question_final_from_lstm:
+                self.question_rnn = nn.LSTM(args.embedding_dim, args.hidden_size, num_layers=2, bidirectional=True)
             self.question_proj = nn.Linear(2 * args.hidden_size, 1)
             if self.args.jenga_iterative_decode:
                 self.decode_rnn = nn.GRU(2 * args.hidden_size, 2 * args.hidden_size, num_layers=1)
                 self.iterative_decode_lin5 = nn.Linear(2 * args.hidden_size, 2 * args.hidden_size)  # corresponds to w5 matrix in SAN paper
+                self.iterative_decode_fc_query = nn.Linear(2 * args.hidden_size, 2 * args.hidden_size)
+                self.iterative_decode_fc_content = nn.Linear(2 * args.hidden_size, 2 * args.hidden_size)
 
 
     def init_last_layer(self):
@@ -359,6 +362,9 @@ class JengaDocReader(nn.Module):
             n_last_hidden_dim *= 2
         if args.jenga_shortcut_embedding:
             n_last_hidden_dim += args.embedding_dim
+        if args.jenga_final_project:
+            expand = 1 if self.args.jenga_question_final_from_lstm else 2
+            self.final_project = nn.Linear(n_last_hidden_dim, expand * n_last_hidden_dim)
         if args.jenga_use_start_for_end:
             self.fc_start = nn.Linear(n_last_hidden_dim, 1)
             self.fc_end_bil = nn.Bilinear(n_last_hidden_dim, n_last_hidden_dim, 1)
@@ -741,10 +747,24 @@ class JengaDocReader(nn.Module):
         return self.final_layer(out, batch_size, c_size, x1_mask, x2_emb)
 
     def final_layer(self, out, batch_size, c_size, x1_mask, x2_emb):
+        hidden_size = self.args.hidden_size
+        out = out.view(-1, batch_size, c_size, 2 * hidden_size)
+        if self.args.jenga_final_project:
+            out = self.final_project(out)
+            if not self.args.jenga_question_final_from_lstm:
+                out, q_repr = out.chunk(2, dim=-1)
+        elif not self.args.jenga_question_final_from_lstm:
+            q_repr = out
         if self.args.pool_type == 'avg':
+            if not self.args.jenga_question_final_from_lstm:
+                q_repr = q_repr.mean(2)
+                # [q_size, batch_size, 2 * channels]
             out = out.mean(0)
         else:
             # assuming max pooling
+            if not self.args.jenga_question_final_from_lstm:
+                q_repr = q_repr.max(2)[0]
+                # [q_size, batch_size, 2 * channels]
             out = out.max(0)[0] # [batch * c_size, 2 * channels]
 
         if self.args.jenga_shortcut_embedding:
@@ -754,7 +774,6 @@ class JengaDocReader(nn.Module):
 
 
         if self.args.span_joint_optimization:
-            hidden_size = self.args.hidden_size
             max_len = self.args.max_len
 
             out = out.view(batch_size, c_size, 2 * hidden_size)
@@ -810,32 +829,39 @@ class JengaDocReader(nn.Module):
             # x2_emb is [batch, emb_size, 1, len_q]
             x2_emb = x2_emb.squeeze(2).permute(2, 0, 1).contiguous()
             # now x2_emb is [len_q, batch, emb_size]
-            encoded_question = self.question_rnn(x2_emb)[0].transpose(0, 1) # [batch, len_q, 2h]
-            encoded_question = self.mid_layers_dropout(encoded_question)
-            weights = self.question_proj(encoded_question).squeeze(2) # [batch, len_q]
-            weights = F.softmax(weights, dim=1).unsqueeze(1) # [b, 1, len_q]
-
-            question_repr = weights.bmm(encoded_question).squeeze(1) # [batch, 2h]
+            encoded_question = self.question_rnn(x2_emb)[0] if self.args.jenga_question_final_from_lstm else q_repr
+            # [len_q, batch, 2h]
+            if self.args.jenga_question_final_sa_sum:
+                encoded_question = encoded_question.transpose(0, 1) # [batch, len_q, 2h]
+                encoded_question = self.mid_layers_dropout(encoded_question)
+                weights = self.question_proj(encoded_question).squeeze(2) # [batch, len_q]
+                weights = F.softmax(weights, dim=1).unsqueeze(1) # [b, 1, len_q]
+                question_repr = weights.bmm(encoded_question).squeeze(1) # [batch, 2h]
+            else:
+                question_repr = encoded_question.mean(0)
             # question_repr is [batch, hidden_size * 2]
             if self.args.jenga_iterative_decode:
                 encoded_context = out.view(batch_size, c_size, -1) # [b, c, 2h]
+                encoded_context_attn_query = self.iterative_decode_fc_query(encoded_context)
+                encoded_context_attn_content = self.iterative_decode_fc_content(encoded_context)
                 def compute_x(s_t):
                     # s_t is [1, b, 2h]
                     projected = self.iterative_decode_lin5(s_t.view(batch_size, -1)).unsqueeze(2)
-                    weights = encoded_context.bmm(projected).view(batch_size, c_size)
+                    weights = encoded_context_attn_query.bmm(projected).view(batch_size, c_size)
                     # weights is [batch, len_c]
                     weights = F.softmax(weights, dim=1).unsqueeze(1)
-                    x_t = weights.bmm(encoded_context)
+                    x_t = weights.bmm(encoded_context_attn_content)
                     return x_t.view(1, batch_size, -1)
                 current_s = question_repr.view(1, batch_size, 2 * self.args.hidden_size)
                 all_s = []
-                n_steps = 5
+                n_steps = 3
                 for i in range(n_steps):
                     current_x = compute_x(current_s)
                     _, current_s = self.decode_rnn(current_x, current_s)
                     # current_s: [1, batch, 2 * h]
                     all_s.append(current_s.squeeze(0))
-                all_s = torch.stack(all_s, dim=1)
+                all_s = torch.stack(all_s[-1:], dim=1)
+                n_steps = 1
                 # [batch, n_steps, 2h]
             else:
                 all_s = question_repr.unsqueeze(1)

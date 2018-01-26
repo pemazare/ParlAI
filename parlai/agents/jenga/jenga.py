@@ -93,7 +93,12 @@ class JengaAgent(Agent):
 
     @staticmethod
     def add_cmdline_args(argparser):
-        config.add_cmdline_args(argparser)
+        agent = config.add_cmdline_args(argparser)
+        agent.add_argument(
+            '--jenga_prepend_doc_with_candidates',
+            type='bool',
+            default=False
+        )
         JengaAgent.dictionary_class().add_cmdline_args(argparser)
 
     @staticmethod
@@ -253,6 +258,10 @@ class JengaAgent(Agent):
         # Data is expected to be text + '\n' + question
         if len(fields) < 2:
             raise RuntimeError('Invalid input. Is task a QA task?')
+
+
+        if self.opt['jenga_prepend_doc_with_candidates'] and 'label_candidates' in ex:
+            fields.insert(0, ' totototo '.join(ex['label_candidates']))
 
         document, question = ' '.join(fields[:-1]), fields[-1]
         inputs['document'], doc_spans = self.word_dict.span_tokenize(document)
