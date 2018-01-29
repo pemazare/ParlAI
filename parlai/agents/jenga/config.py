@@ -260,6 +260,12 @@ def add_cmdline_args(parser):
         help='Iterate over output vector. Requires jenga_use_question_final=True to work'
     )
     agent.add_argument(
+        '--jenga_iterative_decode_nsteps',
+        type=int,
+        default=3,
+        help='Nb steps of iterations for jenga_iterative_decode mode'
+    )
+    agent.add_argument(
         '--dropout_2d_filter',
         type=bool,
         default=True,

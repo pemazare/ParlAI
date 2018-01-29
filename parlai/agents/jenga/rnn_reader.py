@@ -854,7 +854,7 @@ class JengaDocReader(nn.Module):
                     return x_t.view(1, batch_size, -1)
                 current_s = question_repr.view(1, batch_size, 2 * self.args.hidden_size)
                 all_s = []
-                n_steps = 3
+                n_steps = self.args.jenga_iterative_decode_nsteps
                 for i in range(n_steps):
                     current_x = compute_x(current_s)
                     _, current_s = self.decode_rnn(current_x, current_s)
