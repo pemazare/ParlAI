@@ -349,6 +349,10 @@ class JengaDocReader(nn.Module):
                 self.question_rnn = nn.LSTM(args.embedding_dim, args.hidden_size, num_layers=2, bidirectional=True)
             self.question_proj = nn.Linear(2 * args.hidden_size, 1)
             if self.args.jenga_iterative_decode:
+                # self.decode_lin = nn.ModuleList([nn.Sequential(nn.Linear(2 * args.hidden_size, 2 * args.hidden_size),
+                #                                                nn.ReLU(),
+                #                                                nn.Linear(2 * args.hidden_size, 2 * args.hidden_size))
+                #                                 for i in range(self.args.jenga_iterative_decode_nsteps)])
                 self.decode_rnn = nn.GRU(2 * args.hidden_size, 2 * args.hidden_size, num_layers=1)
                 self.iterative_decode_lin5 = nn.Linear(2 * args.hidden_size, 2 * args.hidden_size)  # corresponds to w5 matrix in SAN paper
                 self.iterative_decode_fc_query = nn.Linear(2 * args.hidden_size, 2 * args.hidden_size)
@@ -857,9 +861,11 @@ class JengaDocReader(nn.Module):
                 n_steps = self.args.jenga_iterative_decode_nsteps
                 for i in range(n_steps):
                     current_x = compute_x(current_s)
+                    # current_s = self.decode_lin[i](current_x)
                     _, current_s = self.decode_rnn(current_x, current_s)
                     # current_s: [1, batch, 2 * h]
                     all_s.append(current_s.squeeze(0))
+                # all_s = torch.stack(all_s, dim=1).sum(dim=1, keepdim=True)
                 all_s = torch.stack(all_s[-1:], dim=1)
                 n_steps = 1
                 # [batch, n_steps, 2h]

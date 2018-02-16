@@ -33,6 +33,14 @@ from . import config
 from .utils import build_feature_dict, vectorize, batchify, normalize_text
 from .model import DocReaderModel
 
+
+CANDIDATES = ' '.join(['yes', 'no', 'maybe',
+                       'none', 'one', 'two', 'three',
+                       'cat', 'mouse', 'sheep', 'wolf',
+                       'bedroom', 'bored', 'garden', 'hungry',
+                       'kitchen', 'thirsty', 'tired'
+                       ])  + ' <endcandidates>'
+
 # ------------------------------------------------------------------------------
 # Dictionary.
 # ------------------------------------------------------------------------------
@@ -96,6 +104,11 @@ class JengaAgent(Agent):
         agent = config.add_cmdline_args(argparser)
         agent.add_argument(
             '--jenga_prepend_doc_with_candidates',
+            type='bool',
+            default=False
+        )
+        agent.add_argument(
+            '--jenga_hard_coded_candidates',
             type='bool',
             default=False
         )
@@ -259,9 +272,10 @@ class JengaAgent(Agent):
         if len(fields) < 2:
             raise RuntimeError('Invalid input. Is task a QA task?')
 
-
-        if self.opt['jenga_prepend_doc_with_candidates'] and 'label_candidates' in ex:
-            fields.insert(0, ' totototo '.join(ex['label_candidates']))
+        if self.opt['jenga_hard_coded_candidates']:
+            fields.insert(0, CANDIDATES)
+        elif self.opt['jenga_prepend_doc_with_candidates'] and 'label_candidates' in ex:
+            fields.insert(0, ' totototo '.join(ex['label_candidates']) + ' totototo ')
 
         document, question = ' '.join(fields[:-1]), fields[-1]
         inputs['document'], doc_spans = self.word_dict.span_tokenize(document)
@@ -309,4 +323,5 @@ class JengaAgent(Agent):
             targets.extend(_positions(document, self.word_dict.tokenize(label)))
         if len(targets) == 0:
             return
-        return targets[np.random.choice(len(targets))]
+        return targets[0]
+        # return targets[np.random.choice(len(targets))]

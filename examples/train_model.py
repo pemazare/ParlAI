@@ -90,7 +90,7 @@ def run_eval(agent, opt, datatype, max_exs=-1, write_log=False, valid_world=None
     cnt = 0
     while not valid_world.epoch_done():
         valid_world.parley()
-        if cnt == 21 * opt['batchsize'] and opt['display_examples']:
+        if cnt == 14 * opt['batchsize'] and opt['display_examples']:
             print(valid_world.display() + '\n~~')
             print(valid_world.report())
         cnt += opt['batchsize']

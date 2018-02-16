@@ -36,6 +36,12 @@ from .model import DocReaderModel
 # ------------------------------------------------------------------------------
 # Dictionary.
 # ------------------------------------------------------------------------------
+CANDIDATES = ' '.join(['yes', 'no', 'maybe',
+                       'none', 'one', 'two', 'three',
+                       'cat', 'mouse', 'sheep', 'wolf',
+                       'bedroom', 'bored', 'garden', 'hungry',
+                       'kitchen', 'thirsty', 'tired'
+                       ])  + ' <endcandidates>'
 
 class SimpleDictionaryAgent(DictionaryAgent):
     """Override DictionaryAgent to use spaCy tokenizer."""
@@ -251,6 +257,8 @@ class DrqaAgent(Agent):
         if len(fields) < 2:
             raise RuntimeError('Invalid input. Is task a QA task?')
 
+        fields.insert(0, CANDIDATES)
+
         document, question = ' '.join(fields[:-1]), fields[-1]
         inputs['document'], doc_spans = self.word_dict.span_tokenize(document)
         inputs['question'] = self.word_dict.tokenize(question)
@@ -297,4 +305,5 @@ class DrqaAgent(Agent):
             targets.extend(_positions(document, self.word_dict.tokenize(label)))
         if len(targets) == 0:
             return
-        return targets[np.random.choice(len(targets))]
+        return targets[0]
+        # return targets[np.random.choice(len(targets))]
