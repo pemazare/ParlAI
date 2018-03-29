@@ -28,8 +28,13 @@ from parlai.core.worlds import create_task
 from parlai.core.params import ParlaiParser
 from parlai.core.utils import Timer
 from examples.build_dict import build_dict
+import logging
 import math
 import os
+import sys
+
+
+logger = logging.getLogger()
 
 def setup_args(model_args=None):
     parser = ParlaiParser(True, True, model_argv=model_args)
@@ -272,5 +277,14 @@ class TrainLoop():
 
 
 if __name__ == '__main__':
+    # Set logging
+    logger.setLevel(logging.INFO)
+    fmt = logging.Formatter('%(asctime)s: [ %(message)s ]',
+                            '%m/%d/%Y %I:%M:%S %p')
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    logger.addHandler(console)
+    logger.info('COMMAND: %s' % ' '.join(sys.argv))
+
     TrainLoop(setup_args()).train()
     print()
