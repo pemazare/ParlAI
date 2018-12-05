@@ -1,0 +1,22 @@
+{
+   "blocks": ["2"],
+   "multi_gpu": ["1"],
+   "embedding_dim": ["128"],
+   "hidden_size": ["64"],
+   "bs": ["16"],
+   "jenga_remove_last_do": ["True"],
+   "jenga_residual_rnns": ["True"],
+   "jenga_q_c_dot_product": ["True"],
+   "jenga_use_question_final": ["False"],
+   "jenga_iterative_decode": ["False"],
+   "jenga_question_final_sa_sum": ["False"],
+   "jenga_question_final_from_lstm": ["False"],
+   "jenga_final_project": ["False"],
+   "dropout_jenga": ["0"],
+   "dropout_emb": ["0"],
+   "t": ["babi:Task10k:3"],
+   "mf": ["/tmp/drq_babi3"],
+   "validation-every-n-secs": ["60"],
+   "log-every-n-secs": ["15"],
+   "validation-patience": ["50"]
+}
