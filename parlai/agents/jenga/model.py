@@ -685,6 +685,7 @@ class DocReaderModel(object):
             torch.save(params, filename)
         except BaseException:
             logger.warn('[ WARN: Saving failed... continuing anyway. ]')
+            raise
 
     def load(filename, new_args=None, normalize=True):
         logger.info('Loading model %s' % filename)

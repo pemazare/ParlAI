@@ -178,10 +178,18 @@ class JengaAgent(Agent):
         # shallow copy observation (deep copy can be expensive)
         observation = observation.copy()
         if not self.episode_done and not observation.get('preprocessed', False):
-            dialogue = self.observation['text'].split('\n')[:-1]
+            if self.observation is None:
+                import pdb; pdb.set_trace()
+                self.observation = {'text': ''}
+            try:
+                dialogue = self.observation['text'].split('\n')[:-1]
+            except TypeError:
+                import pdb; pdb.set_trace()
             dialogue.extend(observation['text'].split('\n'))
             observation['text'] = '\n'.join(dialogue)
         self.observation = observation
+        if self.observation is None:
+            import pdb; pdb.set_trace()
         self.episode_done = observation['episode_done']
         return observation
 
@@ -249,8 +257,8 @@ class JengaAgent(Agent):
         """Save the parameters of the agent to a file."""
         fname = self.opt.get('model_file', None) if fname is None else fname
         if fname:
-            print("[ NOT saving model: " + fname + " ]")
-            # self.model.save(fname)
+            print("[ saving model: " + fname + " ]")
+            self.model.save(fname)
 
     # --------------------------------------------------------------------------
     # Helper functions.
